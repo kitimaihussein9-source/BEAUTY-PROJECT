@@ -6,7 +6,7 @@ export async function POST() {
     const supabase = await createAdminClient()
 
     const { data: existingUser, error: userCheckError } =
-      await supabase.auth.admin.getUserByEmail("ecokitaaloop@gmail.com")
+      await supabase.auth.admin.getUserById("ecokitaaloop@gmail.com")
 
     if (existingUser?.user && !userCheckError) {
       console.log("Admin user exists in auth, checking profile...")

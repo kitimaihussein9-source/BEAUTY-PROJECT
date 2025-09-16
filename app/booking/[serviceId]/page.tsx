@@ -1,7 +1,7 @@
+
 "use client"
 
 import type React from "react"
-
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
@@ -10,8 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { PaymentForm } from "@/components/payment-form"
-import { processPayment } from "@/lib/payment"
+import { paymentConfig } from "@/lib/config"
 import { Clock, User, ArrowLeft } from "lucide-react"
 import Link from "next/link"
 
@@ -40,6 +39,8 @@ export default function BookingPage({ params }: { params: Promise<{ serviceId: s
     appointmentTime: "",
     notes: "",
   })
+  const [customerPhone, setCustomerPhone] = useState("");
+  const [transactionId, setTransactionId] = useState<string | null>(null);
   const [paymentResult, setPaymentResult] = useState<any>(null)
   const router = useRouter()
   const supabase = createClient()
@@ -97,28 +98,32 @@ export default function BookingPage({ params }: { params: Promise<{ serviceId: s
     setStep("payment")
   }
 
-  const handlePaymentSubmit = async (paymentData: any) => {
-    if (!service || !user) return
+  const handlePaymentSubmit = async () => {
+    if (!service || !user) return;
 
-    setIsLoading(true)
+    setIsLoading(true);
     try {
-      // Process payment
-      const paymentResult = await processPayment({
-        amount: paymentData.amount,
-        currency: "USD",
-        description: `Payment for ${service.title}`,
-        customerPhone: paymentData.mobileNumber || "0614103439",
-        customerEmail: user.email,
-        appointmentId: "temp_" + Date.now(),
-      })
+      // 1. Initiate Payment via your new API route
+      const response = await fetch("/api/payment/initiate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: service.price,
+          customerPhone,
+          appointmentId: `appt_${service.id}_${Date.now()}`,
+        }),
+      });
 
-      if (!paymentResult.success) {
-        throw new Error(paymentResult.error || "Payment failed")
+      const result = await response.json();
+
+      if (!result.success) {
+        throw new Error(result.error || "Failed to initiate payment.");
       }
 
-      // Create appointment in database
-      const appointmentDateTime = new Date(`${bookingData.appointmentDate}T${bookingData.appointmentTime}`)
+      setTransactionId(result.transactionId);
 
+      // 2. Create appointment in the database with 'pending' status
+      const appointmentDateTime = new Date(`${bookingData.appointmentDate}T${bookingData.appointmentTime}`);
       const { data: appointment, error } = await supabase
         .from("appointments")
         .insert({
@@ -126,31 +131,33 @@ export default function BookingPage({ params }: { params: Promise<{ serviceId: s
           provider_id: service.provider_id,
           service_id: service.id,
           appointment_date: appointmentDateTime.toISOString(),
-          total_amount: paymentData.amount,
-          payment_status: "paid",
-          payment_id: paymentResult.paymentId,
+          total_amount: service.price,
+          payment_status: "pending", // IMPORTANT: Status is now pending
+          payment_id: result.transactionId, // Store the simulated transaction ID
           notes: bookingData.notes,
-          status: "confirmed",
+          status: "pending", // Overall appointment status
         })
         .select()
-        .single()
+        .single();
 
       if (error) {
-        throw new Error("Failed to create appointment")
+        throw new Error(`Failed to create appointment: ${error.message}`);
       }
 
-      setPaymentResult({ success: true, appointment })
-      setStep("confirmation")
+      // 3. Move to confirmation screen
+      setPaymentResult({ success: true, appointment });
+      setStep("confirmation");
+
     } catch (error) {
-      console.error("Booking error:", error)
+      console.error("Booking Error:", error);
       setPaymentResult({
         success: false,
-        error: error instanceof Error ? error.message : "Booking failed",
-      })
+        error: error instanceof Error ? error.message : "An unknown error occurred.",
+      });
     } finally {
-      setIsLoading(false)
+      setIsLoading(false);
     }
-  }
+  };
 
   if (!service) {
     return (
@@ -192,7 +199,9 @@ export default function BookingPage({ params }: { params: Promise<{ serviceId: s
                   <User className="h-4 w-4" />
                   {service.profiles.full_name}
                 </div>
-                <div className="text-2xl font-bold text-pink-600">${service.price}</div>
+                <div className="text-2xl font-bold text-pink-600">
+                  {new Intl.NumberFormat('en-US', { style: 'currency', currency: paymentConfig.currency }).format(service.price)}
+                </div>
                 <p className="text-sm text-gray-600">{service.description}</p>
               </CardContent>
             </Card>
@@ -264,55 +273,59 @@ export default function BookingPage({ params }: { params: Promise<{ serviceId: s
             )}
 
             {step === "payment" && (
-              <PaymentForm
-                servicePrice={service.price}
-                serviceName={service.title}
-                providerName={service.profiles.full_name}
-                onPaymentSubmit={handlePaymentSubmit}
-                isLoading={isLoading}
-              />
+              <Card>
+                <CardHeader>
+                  <CardTitle>Confirm Payment</CardTitle>
+                  <CardDescription>
+                     Enter your phone number to initiate the mobile money payment.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <div className="space-y-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="customerPhone">Your Halopesa Number</Label>
+                            <Input
+                                id="customerPhone"
+                                type="tel"
+                                placeholder="e.g., 0612345678"
+                                value={customerPhone}
+                                onChange={(e) => setCustomerPhone(e.target.value)}
+                                required
+                            />
+                        </div>
+                        <Button onClick={handlePaymentSubmit} disabled={isLoading || !customerPhone} className="w-full">
+                            {isLoading ? "Processing..." : `Pay ${new Intl.NumberFormat('en-US', { style: 'currency', currency: paymentConfig.currency }).format(service.price)}`}
+                        </Button>
+                    </div>
+                </CardContent>
+              </Card>
             )}
 
             {step === "confirmation" && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-green-600">
-                    {paymentResult?.success ? "Booking Confirmed!" : "Booking Failed"}
+                  <CardTitle className={paymentResult?.success ? "text-green-600" : "text-red-600"}>
+                    {paymentResult?.success ? "Payment Initiated!" : "Booking Failed"}
                   </CardTitle>
                   <CardDescription>
                     {paymentResult?.success
-                      ? "Your appointment has been successfully booked"
-                      : "There was an issue with your booking"}
+                      ? "Your booking is pending. Please complete the payment on your phone."
+                      : "There was an issue with your booking."}
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   {paymentResult?.success ? (
                     <>
                       <div className="bg-green-50 p-4 rounded-lg">
-                        <h3 className="font-medium text-green-800 mb-2">Booking Details</h3>
-                        <div className="space-y-1 text-sm text-green-700">
-                          <p>
-                            <strong>Service:</strong> {service.title}
-                          </p>
-                          <p>
-                            <strong>Provider:</strong> {service.profiles.full_name}
-                          </p>
-                          <p>
-                            <strong>Date:</strong>{" "}
-                            {new Date(
-                              `${bookingData.appointmentDate}T${bookingData.appointmentTime}`,
-                            ).toLocaleDateString()}
-                          </p>
-                          <p>
-                            <strong>Time:</strong>{" "}
-                            {new Date(
-                              `${bookingData.appointmentDate}T${bookingData.appointmentTime}`,
-                            ).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                          </p>
-                          <p>
-                            <strong>Total Paid:</strong> ${service.price}
-                          </p>
-                        </div>
+                        <h3 className="font-medium text-green-800 mb-2">Next Steps</h3>
+                        <p className="text-sm text-green-700">
+                          A payment request has been sent to your phone. Please authorize the payment of
+                          <strong> {new Intl.NumberFormat('en-US', { style: 'currency', currency: paymentConfig.currency }).format(service.price)} </strong>
+                           to complete your booking.
+                        </p>
+                        <p className="text-sm text-green-700 mt-2">
+                          Your Transaction ID is: <strong>{transactionId}</strong>
+                        </p>
                       </div>
                       <div className="flex gap-4">
                         <Button asChild>
