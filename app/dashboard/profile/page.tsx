@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import Link from "next/link"
-import { ArrowLeft, Camera, Save, User, Mail, Phone, Calendar } from "lucide-react"
+import { ArrowLeft, Camera, Save, User, Mail, Phone, Calendar, LogOut } from "lucide-react"
 
 interface Profile {
   id: string
@@ -133,6 +133,16 @@ export default function ProfilePage() {
       setMessage({ type: "error", text: "Failed to update profile" })
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  const handleSignOut = async () => {
+    const { error } = await supabase.auth.signOut()
+    if (error) {
+      console.error("Error signing out:", error)
+      setMessage({ type: "error", text: "Failed to sign out" })
+    } else {
+      router.push("/auth/login")
     }
   }
 
@@ -371,6 +381,17 @@ export default function ProfilePage() {
                   </div>
                   <Button variant="outline" size="sm" asChild>
                     <Link href="/dashboard/profile/change-password">Change</Link>
+                  </Button>
+                </div>
+                <Separator />
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-medium">Sign Out</h4>
+                    <p className="text-sm text-gray-500">Sign out of your account</p>
+                  </div>
+                  <Button variant="destructive" size="sm" onClick={handleSignOut}>
+                    <LogOut className="h-4 w-4 mr-2" />
+                    Sign Out
                   </Button>
                 </div>
               </CardContent>
