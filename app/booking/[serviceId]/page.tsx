@@ -2,18 +2,17 @@
 "use client"
 
 import type React from "react"
-import { useState, useEffect, useMemo } from "react"
+import { useState, useEffect } from "react"
 import { useRouter, useParams } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
-import { add, format, set, parseISO } from 'date-fns'
+import { add, format, set, parseISO, startOfDay, endOfDay } from 'date-fns'
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Calendar } from "@/components/ui/calendar"
-import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Tag, Clock, DollarSign, User, Info, ArrowLeft, Loader2 } from "lucide-react"
+import { Clock, ArrowLeft, Loader2 } from "lucide-react"
 import Link from "next/link"
 
 // Combined type for service and its provider
@@ -21,10 +20,9 @@ interface ServiceWithProvider {
   id: string
   title: string
   description: string | null
-  category: string
   price: number
   duration_minutes: number
-  provider_id: string // Need provider_id for booking
+  provider_id: string
   profiles: {
     full_name: string | null
     avatar_url: string | null
@@ -42,6 +40,7 @@ export default function BookingPage() {
   const [selectedTime, setSelectedTime] = useState<string | null>(null)
   const [availableSlots, setAvailableSlots] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [isFetchingSlots, setIsFetchingSlots] = useState(false)
   const [isBooking, setIsBooking] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -53,10 +52,7 @@ export default function BookingPage() {
       try {
         const { data, error } = await supabase
           .from("services")
-          .select(`
-            id, title, description, category, price, duration_minutes, provider_id,
-            profiles (full_name, avatar_url)
-          `)
+          .select(`id, title, description, price, duration_minutes, provider_id, profiles (full_name, avatar_url)`)
           .eq("id", serviceId)
           .single()
 
@@ -71,28 +67,71 @@ export default function BookingPage() {
     fetchServiceDetails()
   }, [serviceId])
 
-  // Generate time slots when date or service changes
+  // Generate available time slots when date or service changes
   useEffect(() => {
     if (!selectedDate || !service) return
 
-    const generateSlots = async () => {
-      const duration = service.duration_minutes
-      const dayStart = set(selectedDate, { hours: 9, minutes: 0, seconds: 0, milliseconds: 0 })
-      const dayEnd = set(selectedDate, { hours: 17, minutes: 0, seconds: 0, milliseconds: 0 })
-      const slots = []
-      
-      let currentTime = dayStart
-      while (add(currentTime, { minutes: duration }) <= dayEnd) {
-        slots.push(format(currentTime, "HH:mm"))
-        currentTime = add(currentTime, { minutes: 30 }) // Generate slots every 30 mins for simplicity
-      }
+    const generateAndFilterSlots = async () => {
+      setIsFetchingSlots(true)
+      setSelectedTime(null) // Reset selected time
+      setError(null)
 
-      // In a real app, you would also fetch existing bookings for this provider on this day
-      // and filter out the slots that are already taken.
-      setAvailableSlots(slots)
+      try {
+        // Fetch existing bookings for the provider on the selected date
+        const from = startOfDay(selectedDate).toISOString()
+        const to = endOfDay(selectedDate).toISOString()
+        
+        const { data: existingBookings, error: bookingsError } = await supabase
+            .from('bookings')
+            .select('start_time, end_time')
+            .eq('provider_id', service.provider_id)
+            .gte('start_time', from)
+            .lte('start_time', to)
+
+        if (bookingsError) throw bookingsError
+
+        const bookedIntervals = existingBookings.map(b => ({
+            start: parseISO(b.start_time),
+            end: parseISO(b.end_time),
+        }))
+
+        // Generate potential slots for the day (9am - 5pm)
+        const duration = service.duration_minutes
+        const dayStart = set(selectedDate, { hours: 9, minutes: 0, seconds: 0, milliseconds: 0 })
+        const dayEnd = set(selectedDate, { hours: 17, minutes: 0, seconds: 0, milliseconds: 0 })
+        const interval = 30; // Check for a new slot every 30 minutes
+
+        const potentialSlots = []
+        let currentTime = dayStart
+        while (currentTime < dayEnd) {
+          potentialSlots.push(currentTime)
+          currentTime = add(currentTime, { minutes: interval })
+        }
+
+        // Filter out slots that are booked or don't have enough time
+        const filteredSlots = potentialSlots.filter(slotStart => {
+            const slotEnd = add(slotStart, { minutes: duration })
+            // The service must not end after the workday is over
+            if (slotEnd > dayEnd) return false
+
+            // The slot must not overlap with any existing booking
+            const isOverlapping = bookedIntervals.some(booked => 
+                slotStart < booked.end && slotEnd > booked.start
+            )
+            return !isOverlapping
+        })
+        
+        setAvailableSlots(filteredSlots.map(date => format(date, "HH:mm")))
+
+      } catch (err: any) {
+        console.error("Error generating slots:", err)
+        setError("Could not verify available time slots. Please refresh and try again.")
+      } finally {
+        setIsFetchingSlots(false)
+      }
     }
 
-    generateSlots()
+    generateAndFilterSlots()
   }, [selectedDate, service])
 
   const handleBooking = async () => {
@@ -100,14 +139,12 @@ export default function BookingPage() {
       setError("Please select a date and time to book.")
       return
     }
-
     setIsBooking(true)
     setError(null)
 
     try {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) {
-        // Redirect to login but remember where to come back to
         router.push(`/auth/login?redirect=/booking/${serviceId}`)
         return
       }
@@ -115,7 +152,6 @@ export default function BookingPage() {
       const startTime = set(selectedDate, {
         hours: parseInt(selectedTime.split(":")[0]),
         minutes: parseInt(selectedTime.split(":")[1]),
-        seconds: 0,
       });
       const endTime = add(startTime, { minutes: service.duration_minutes })
 
@@ -125,19 +161,15 @@ export default function BookingPage() {
         service_id: service.id,
         start_time: startTime.toISOString(),
         end_time: endTime.toISOString(),
-        status: 'confirmed', 
+        status: 'confirmed',
         total_price: service.price,
       })
 
-      if (bookingError) {
-        throw bookingError
-      }
+      if (bookingError) throw bookingError
 
-      // Redirect to a confirmation page or user's bookings list
       router.push("/dashboard/bookings?status=new")
 
     } catch (err: any) {
-      console.error("Booking Error:", err)
       setError(err.message || "An unexpected error occurred during booking.")
     } finally {
       setIsBooking(false)
@@ -174,11 +206,9 @@ export default function BookingPage() {
                 </Link>
             </Button>
             <h1 className="text-3xl font-bold text-gray-900">Confirm Your Booking</h1>
-            <p className="text-gray-600">You are one step away from booking your service.</p>
         </div>
 
         <div className="container mx-auto px-4 grid lg:grid-cols-3 gap-8">
-            {/* Left Column: Calendar & Time */}
             <div className="lg:col-span-2 space-y-8">
                 <Card>
                     <CardHeader>
@@ -189,7 +219,7 @@ export default function BookingPage() {
                             mode="single"
                             selected={selectedDate}
                             onSelect={setSelectedDate}
-                            disabled={(date) => date < new Date() || date.getDay() === 0 || date.getDay() === 6}
+                            disabled={(date) => date < startOfDay(new Date()) || date.getDay() === 0 || date.getDay() === 6}
                             className="rounded-md border"
                         />
                     </CardContent>
@@ -200,19 +230,22 @@ export default function BookingPage() {
                         <CardDescription>Available slots for {selectedDate ? format(selectedDate, 'PPP') : '...'}</CardDescription>
                     </CardHeader>
                     <CardContent className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-3">
-                        {availableSlots.length > 0 ? availableSlots.map(time => (
+                        {isFetchingSlots ? (
+                           <div className="col-span-full flex items-center justify-center py-4">
+                               <Loader2 className="h-6 w-6 animate-spin text-primary" /> 
+                           </div>
+                        ) : availableSlots.length > 0 ? availableSlots.map(time => (
                             <Button 
                                 key={time}
                                 variant={selectedTime === time ? 'default' : 'outline'}
                                 onClick={() => setSelectedTime(time)}>
                                 {time}
                             </Button>
-                        )) : <p className="col-span-full text-center text-gray-500">No available slots for this day.</p>}
+                        )) : <p className="col-span-full text-center text-gray-500 py-4">No available slots for this day.</p>}
                     </CardContent>
                 </Card>
             </div>
 
-            {/* Right Column: Service Summary & Confirmation */}
             <div className="lg:col-span-1">
                  <Card className="sticky top-24">
                     <CardHeader>
@@ -244,7 +277,7 @@ export default function BookingPage() {
                         )}
                     </CardContent>
                     <div className="p-4 border-t">
-                        <Button size="lg" className="w-full" onClick={handleBooking} disabled={isBooking || !selectedTime || !selectedDate}>
+                        <Button size="lg" className="w-full" onClick={handleBooking} disabled={isBooking || !selectedTime || !selectedDate || isFetchingSlots}>
                             {isBooking ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Booking...</> : 'Confirm & Book'}
                         </Button>
                     </div>
@@ -254,4 +287,3 @@ export default function BookingPage() {
     </div>
   )
 }
-
