@@ -5,7 +5,7 @@ import type React from "react"
 import { useState, useEffect } from "react"
 import { useRouter, useParams } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
-import { add, format, set, parseISO, startOfDay, endOfDay } from 'date-fns'
+import { add, format, set, parseISO, startOfDay, endOfDay, getDay, parse } from 'date-fns'
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -73,14 +73,33 @@ export default function BookingPage() {
 
     const generateAndFilterSlots = async () => {
       setIsFetchingSlots(true)
-      setSelectedTime(null) // Reset selected time
+      setSelectedTime(null)
       setError(null)
+      setAvailableSlots([])
 
       try {
-        // Fetch existing bookings for the provider on the selected date
+        const dayOfWeek = getDay(selectedDate) // Sunday = 0, Monday = 1, etc.
+
+        // 1. Fetch provider's availability for the selected day of the week
+        const { data: availabilityData, error: availabilityError } = await supabase
+          .from('provider_availability')
+          .select('start_time, end_time, is_available')
+          .eq('provider_id', service.provider_id)
+          .eq('day_of_week', dayOfWeek)
+          .single()
+        
+        if (availabilityError) {
+            console.warn(`No custom availability set for provider ${service.provider_id} on day ${dayOfWeek}. Using defaults.`)
+        }
+
+        // If provider is not available on this day, show no slots
+        if (!availabilityData || !availabilityData.is_available) {
+            return; // No need to proceed
+        }
+
+        // 2. Fetch existing bookings for the provider on the selected date
         const from = startOfDay(selectedDate).toISOString()
         const to = endOfDay(selectedDate).toISOString()
-        
         const { data: existingBookings, error: bookingsError } = await supabase
             .from('bookings')
             .select('start_time, end_time')
@@ -95,11 +114,17 @@ export default function BookingPage() {
             end: parseISO(b.end_time),
         }))
 
-        // Generate potential slots for the day (9am - 5pm)
+        // 3. Generate potential slots based on provider's custom hours
         const duration = service.duration_minutes
-        const dayStart = set(selectedDate, { hours: 9, minutes: 0, seconds: 0, milliseconds: 0 })
-        const dayEnd = set(selectedDate, { hours: 17, minutes: 0, seconds: 0, milliseconds: 0 })
-        const interval = 30; // Check for a new slot every 30 minutes
+        const interval = 30 // Generate slots every 30 mins
+
+        // Parse the time from 'HH:MM:SS' string to a Date object
+        const baseDate = selectedDate
+        const startTime = parse(availabilityData.start_time, 'HH:mm:ss', baseDate)
+        const endTime = parse(availabilityData.end_time, 'HH:mm:ss', baseDate)
+        
+        const dayStart = set(selectedDate, { hours: startTime.getHours(), minutes: startTime.getMinutes() })
+        const dayEnd = set(selectedDate, { hours: endTime.getHours(), minutes: endTime.getMinutes() })
 
         const potentialSlots = []
         let currentTime = dayStart
@@ -108,13 +133,11 @@ export default function BookingPage() {
           currentTime = add(currentTime, { minutes: interval })
         }
 
-        // Filter out slots that are booked or don't have enough time
+        // 4. Filter out slots that conflict with existing bookings or don't have enough time
         const filteredSlots = potentialSlots.filter(slotStart => {
             const slotEnd = add(slotStart, { minutes: duration })
-            // The service must not end after the workday is over
             if (slotEnd > dayEnd) return false
 
-            // The slot must not overlap with any existing booking
             const isOverlapping = bookedIntervals.some(booked => 
                 slotStart < booked.end && slotEnd > booked.start
             )
@@ -132,9 +155,9 @@ export default function BookingPage() {
     }
 
     generateAndFilterSlots()
-  }, [selectedDate, service])
+  }, [selectedDate, service, supabase])
 
-  const handleBooking = async () => {
+    const handleBooking = async () => {
     if (!service || !selectedDate || !selectedTime) {
       setError("Please select a date and time to book.")
       return
@@ -219,7 +242,7 @@ export default function BookingPage() {
                             mode="single"
                             selected={selectedDate}
                             onSelect={setSelectedDate}
-                            disabled={(date) => date < startOfDay(new Date()) || date.getDay() === 0 || date.getDay() === 6}
+                            disabled={(date) => date < startOfDay(new Date())}
                             className="rounded-md border"
                         />
                     </CardContent>
@@ -241,7 +264,7 @@ export default function BookingPage() {
                                 onClick={() => setSelectedTime(time)}>
                                 {time}
                             </Button>
-                        )) : <p className="col-span-full text-center text-gray-500 py-4">No available slots for this day.</p>}
+                        )) : <p className="col-span-full text-center text-gray-500 py-4">This provider is not available on this day.</p>}
                     </CardContent>
                 </Card>
             </div>
