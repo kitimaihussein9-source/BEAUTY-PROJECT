@@ -37,7 +37,6 @@ interface BookingDetails {
     title: string
     duration_minutes: number
   }
-  // Depending on the user role, we get either the provider or the customer
   provider?: {
     full_name: string | null
     avatar_url: string | null
@@ -89,7 +88,7 @@ function BookingsComponent() {
             .select(`
               id, start_time, end_time, status, total_price,
               service:services(title, duration_minutes),
-              customer:profiles!bookings_customer_id_fkey(full_name, avatar_url)
+              customer:profiles!bookings_customer_id_fkey(full_name, avatar_url, email)
             `)
             .eq('provider_id', user.id)
         } else {
@@ -98,7 +97,7 @@ function BookingsComponent() {
             .select(`
               id, start_time, end_time, status, total_price,
               service:services(title, duration_minutes),
-              provider:profiles!bookings_provider_id_fkey(full_name, avatar_url)
+              provider:profiles!bookings_provider_id_fkey(full_name, avatar_url, email)
             `)
             .eq('customer_id', user.id)
         }
@@ -125,19 +124,18 @@ function BookingsComponent() {
     if (!bookingToCancel) return
 
     setIsCancelling(async () => {
-        const { error } = await supabase
+        const { error: updateError } = await supabase
             .from('bookings')
             .update({ status: 'cancelled' })
             .eq('id', bookingToCancel)
 
-        if (error) {
+        if (updateError) {
             toast({
                 title: "Cancellation Failed",
-                description: error.message,
+                description: updateError.message,
                 variant: "destructive",
             })
         } else {
-            // Update UI optimistically
             setBookings(currentBookings => 
                 currentBookings.map(b => b.id === bookingToCancel ? { ...b, status: 'cancelled'} : b)
             )
@@ -145,8 +143,16 @@ function BookingsComponent() {
                 title: "Booking Cancelled",
                 description: "The appointment has been successfully cancelled.",
             })
+
+            // Trigger the notification function
+            const { error: functionError } = await supabase.functions.invoke('booking-notification', {
+                body: { type: 'cancelled', bookingId: bookingToCancel },
+            });
+            if (functionError) {
+                console.error("Failed to send cancellation email:", functionError);
+            }
         }
-        setBookingToCancel(null) // Close dialog
+        setBookingToCancel(null)
     });
   }
 

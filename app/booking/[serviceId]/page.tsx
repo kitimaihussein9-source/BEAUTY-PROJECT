@@ -65,7 +65,7 @@ export default function BookingPage() {
       }
     }
     fetchServiceDetails()
-  }, [serviceId])
+  }, [serviceId, supabase])
 
   // Generate available time slots when date or service changes
   useEffect(() => {
@@ -80,7 +80,6 @@ export default function BookingPage() {
       try {
         const dayOfWeek = getDay(selectedDate) // Sunday = 0, Monday = 1, etc.
 
-        // 1. Fetch provider's availability for the selected day of the week
         const { data: availabilityData, error: availabilityError } = await supabase
           .from('provider_availability')
           .select('start_time, end_time, is_available')
@@ -92,12 +91,10 @@ export default function BookingPage() {
             console.warn(`No custom availability set for provider ${service.provider_id} on day ${dayOfWeek}. Using defaults.`)
         }
 
-        // If provider is not available on this day, show no slots
         if (!availabilityData || !availabilityData.is_available) {
-            return; // No need to proceed
+            return;
         }
 
-        // 2. Fetch existing bookings for the provider on the selected date
         const from = startOfDay(selectedDate).toISOString()
         const to = endOfDay(selectedDate).toISOString()
         const { data: existingBookings, error: bookingsError } = await supabase
@@ -114,11 +111,9 @@ export default function BookingPage() {
             end: parseISO(b.end_time),
         }))
 
-        // 3. Generate potential slots based on provider's custom hours
         const duration = service.duration_minutes
-        const interval = 30 // Generate slots every 30 mins
+        const interval = 30
 
-        // Parse the time from 'HH:MM:SS' string to a Date object
         const baseDate = selectedDate
         const startTime = parse(availabilityData.start_time, 'HH:mm:ss', baseDate)
         const endTime = parse(availabilityData.end_time, 'HH:mm:ss', baseDate)
@@ -133,7 +128,6 @@ export default function BookingPage() {
           currentTime = add(currentTime, { minutes: interval })
         }
 
-        // 4. Filter out slots that conflict with existing bookings or don't have enough time
         const filteredSlots = potentialSlots.filter(slotStart => {
             const slotEnd = add(slotStart, { minutes: duration })
             if (slotEnd > dayEnd) return false
@@ -157,7 +151,7 @@ export default function BookingPage() {
     generateAndFilterSlots()
   }, [selectedDate, service, supabase])
 
-    const handleBooking = async () => {
+  const handleBooking = async () => {
     if (!service || !selectedDate || !selectedTime) {
       setError("Please select a date and time to book.")
       return
@@ -178,7 +172,7 @@ export default function BookingPage() {
       });
       const endTime = add(startTime, { minutes: service.duration_minutes })
 
-      const { error: bookingError } = await supabase.from("bookings").insert({
+      const { data: newBooking, error: bookingError } = await supabase.from("bookings").insert({
         customer_id: user.id,
         provider_id: service.provider_id,
         service_id: service.id,
@@ -186,9 +180,20 @@ export default function BookingPage() {
         end_time: endTime.toISOString(),
         status: 'confirmed',
         total_price: service.price,
-      })
+      }).select('id').single()
 
       if (bookingError) throw bookingError
+      
+      // After successful booking, trigger the notification function
+      if (newBooking) {
+          const { error: functionError } = await supabase.functions.invoke('booking-notification', {
+              body: { type: 'confirmed', bookingId: newBooking.id },
+          })
+          if (functionError) {
+              // Log the error but don't block the user. The booking is still made.
+              console.error('Failed to send confirmation email:', functionError)
+          }
+      }
 
       router.push("/dashboard/bookings?status=new")
 
